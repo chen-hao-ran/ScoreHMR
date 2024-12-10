@@ -12,7 +12,7 @@ from functools import partial
 
 from scorehmr.utils.utils import *
 from scorehmr.utils.geometry import aa_to_rotmat, rot6d_to_rotmat
-from score_hmr.utils.guidance_losses import keypoint_fitting_loss, multiview_loss, smoothness_loss
+from scorehmr.utils.guidance_losses import keypoint_fitting_loss, multiview_loss, smoothness_loss
 
 
 class GaussianDiffusion(nn.Module):
@@ -230,10 +230,9 @@ class GaussianDiffusion(nn.Module):
         x: torch.Tensor,
         t_: torch.Tensor,
         cond_feats: torch.Tensor,
-        batch: Dict = None,
+        mv_batch: Dict = None,
         clip_x_start: bool = True,
         inverse: bool = False,
-        mv_data: Dict = None,
         step: int = 0,
         time: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -262,7 +261,7 @@ class GaussianDiffusion(nn.Module):
                 timestep = t_[0]
                 if timestep <= self.sample_start:
                     # Compute score guidance, Eq. (8) in the paper.
-                    scaled_gradient, mask = self.cond_fn(x, t_, pred_noise, batch, mv_data, step, time)
+                    scaled_gradient, mask = self.cond_fn(x, t_, pred_noise, mv_batch, step, time)
                     # Compute modified noise prediction, Eq. (10) in the paper.
                     pred_noise += self.sqrt_one_minus_alphas_cumprod[timestep].item() * scaled_gradient
 
@@ -283,7 +282,7 @@ class GaussianDiffusion(nn.Module):
 
 
     def cond_fn(
-        self, x: torch.Tensor, t_: torch.Tensor, pred_noise: torch.Tensor, batch: Dict, mv_data: Dict, step: int, time: int,
+        self, x: torch.Tensor, t_: torch.Tensor, pred_noise: torch.Tensor, mv_batch: Dict, step: int, time: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Functions to compute score guidance.
@@ -296,6 +295,7 @@ class GaussianDiffusion(nn.Module):
             - The conditional score
             - A mask suggesting which samples coverged in the current step (if applying early stopping).
         """
+        batch = mv_batch[0]
         real_batch_size = batch["keypoints_2d"].size(0)
         num_samples = x.size(0) // real_batch_size
 
@@ -340,46 +340,12 @@ class GaussianDiffusion(nn.Module):
                     cam=0,
                 )
 
-                # # Get processed extri
-                view_num = 6
-                frame_num = 1200
-                # pred_keypoints_3d += self.camera_translation.unsqueeze(1)
-                # pred_kp3d, R_list, t_list, f_list, c_list = [], [], [], [], []
-                # for persp in range(view_num):
-                #     processed_extri = mv_data['processed_extri'][persp]
-                #     R = processed_extri[:3, :3].unsqueeze(0).tile(frame_num, 1, 1)
-                #     t = processed_extri[:3, 3].unsqueeze(0).tile(frame_num, 1)
-                #     focal_length = batch["focal_length"][:, 0]
-                #     camera_center = batch["camera_center"]
-                #     pred_kp3d.append(pred_keypoints_3d)
-                #     R_list.append(R)
-                #     t_list.append(t)
-                #     f_list.append(focal_length)
-                #     c_list.append(camera_center)
-                # pred_kp3d_all = torch.cat(pred_kp3d, dim=0)
-                # R_all = torch.cat(R_list, dim=0)
-                # t_all = torch.cat(t_list, dim=0)
-                # f_all = torch.cat(f_list, dim=0)
-                # c_all = torch.cat(c_list, dim=0)
-                # # Project
-                # pred_keypoints_2d = perspective_projection(pred_kp3d_all, R_all, t_all, f_all, c_all)
-                # # Visualize
-                # for idx in range(frame_num):
-                #     for persp in range(view_num):
-                #         image = cv2.imread(f'/home/chr/data/research/human3d/code/noah-research/CLIFF/data/dataset/OcMotion-test/images/0013/Camera{persp:02d}/{idx:05d}.jpg')
-                #         for p in pred_keypoints_2d[persp * frame_num + idx]:
-                #             cv2.circle(image, (int(p[0]), int(p[1])), 7, (0, 255, 255), -1)
-                #         output_dir = f'output/check/mv_project/Camera{persp:02d}'
-                #         # os.makedirs(output_dir, exist_ok=True)
-                #         output_path = os.path.join(output_dir, f'{idx:05d}.jpg')
-                #         cv2.imwrite(output_path, image)
-
-
                 # Multi-view keypoint error
                 extra_batch = mv_data['extra_batch']
                 R_new_R0_inv = mv_data['R_new_R0_inv']
                 extri = mv_data['extri']
-                for idx in range(view_num):
+                view_num = len(extra_batch)
+                for idx in range(1, view_num):
                     t0 = extri[0][:3, 3]
                     t_new = extri[idx][:3, 3]
                     pk3d = torch.matmul(pred_keypoints_3d, R_new_R0_inv[idx].T)
@@ -428,7 +394,7 @@ class GaussianDiffusion(nn.Module):
 
 
     @torch.no_grad()
-    def sample(self, batch: Dict, cond_feats: torch.Tensor, mv_data: Dict, batch_size: int):
+    def sample(self, mv_batch: Dict, cond_feats: torch.Tensor, batch_size: int):
         """
         Run vanilla DDIM or DDIM with score guidance.
         Args:
@@ -438,7 +404,7 @@ class GaussianDiffusion(nn.Module):
         """
         shape = (batch_size, self.model.diffusion_dim)
         sample_fn = self.ddim_with_guidance if self.use_guidance else self.ddim_vanilla
-        return sample_fn(batch, cond_feats, shape, mv_data)
+        return sample_fn(mv_batch, cond_feats, shape)
 
 
     @torch.no_grad()
@@ -491,10 +457,9 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     def ddim_with_guidance(
         self,
-        batch: Dict,
+        mv_batch: Dict,
         cond_feats: torch.Tensor,
         shape: Tuple,
-        mv_data: Dict,
         clip_denoised: bool = False,
         eta: float = 0.0,
     ) -> Dict:
@@ -509,7 +474,7 @@ class GaussianDiffusion(nn.Module):
         Returns:
             Dictionary with the refined x_start and optionally the optimized camera_translation.
         """
-
+        batch = mv_batch[0]
         batch_size = shape[0]
         times = list(range(0, self.sample_start + 1, self.ddim_step_size))
         times_next = [-1] + list(times[:-1])
@@ -550,7 +515,7 @@ class GaussianDiffusion(nn.Module):
                     x_t,
                     time_cond,
                     cond_feats=cond_feats,
-                    batch=batch,
+                    mv_batch=mv_batch,
                     clip_x_start=clip_denoised,
                     inverse=True
                 )
@@ -564,9 +529,8 @@ class GaussianDiffusion(nn.Module):
                     x_t,
                     time_cond,
                     cond_feats=cond_feats,
-                    batch=batch,
+                    mv_batch=mv_batch,
                     clip_x_start=clip_denoised,
-                    mv_data=mv_data,
                     step=step,
                     time=time,
                 )

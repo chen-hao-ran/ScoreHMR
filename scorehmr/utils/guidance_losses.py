@@ -52,7 +52,6 @@ def keypoint_fitting_loss(
     projected_joints = perspective_projection(
         model_joints, camera_translation, focal_length, camera_center=camera_center
     )
-    projected_joints[:, 19:] = 0
     vis_mask = vis_mask.to(torch.bool)
     not_vis_mask = ~vis_mask
     projected_joints[not_vis_mask] = 0.
